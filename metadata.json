@@ -1,0 +1,6 @@
+{
+  "name": "AI Translator",
+  "description": "Android application wrapping the AI Translator web platform with splash screen, adaptive design, and AdMob integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
