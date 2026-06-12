@@ -21,11 +21,21 @@ jobs:
         distribution: 'temurin'
         java-version: '21'
 
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
-    - name: Prepare Keystore and Environment Properties
+    - name: Prepare Keystore, Line Endings, and Environment Properties
       run: |
+        # Clean line endings in wrapper script to prevent command interpreter errors on Linux execution (especially for files created on Windows)
+        if [ -f gradlew ]; then
+          echo "Cleaning CRLF carriage returns in gradlew..."
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+        fi
+
         if [ -f debug.keystore.base64 ]; then
           echo "Decoding debug.keystore.base64..."
           base64 -d debug.keystore.base64 > debug.keystore
@@ -35,19 +45,18 @@ jobs:
         fi
         
         if [ ! -f .env ]; then
-          echo "Copying .env.example to .env..."
+          echo "Creating empty or example .env file to satisfy Secrets Gradle Plugin..."
           cp .env.example .env || touch .env
         fi
-
-    - name: Grant Execute Permission to Gradlew
-      run: chmod +x gradlew || true
 
     - name: Build Debug APK
       run: |
         if [ -f gradlew ]; then
-          ./gradlew assembleDebug
+          echo "Building with Gradle Wrapper..."
+          ./gradlew assembleDebug --stacktrace
         else
-          gradle assembleDebug
+          echo "Building with System Gradle..."
+          gradle assembleDebug --stacktrace
         fi
 
     - name: Upload APK Artifacts
@@ -55,4 +64,5 @@ jobs:
       with:
         name: AI_Translator_APK
         path: app/build/outputs/apk/debug/app-debug.apk
+
 
