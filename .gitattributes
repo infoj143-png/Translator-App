@@ -1,0 +1,21 @@
+# Set default behavior to automatic text/binary detection
+* text=auto
+
+# Explicitly declare binary files that should not be touched
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+
+# Explicitly ensure the Gradle Wrapper jar is handled as a binary file
+gradle/wrapper/gradle-wrapper.jar binary
+
+# Ensure shell scripts have LF line endings to run properly on Unix/Linux runtimes (like GitHub actions)
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Ensure Windows batch files have CRLF line endings
+*.bat text eol=crlf
