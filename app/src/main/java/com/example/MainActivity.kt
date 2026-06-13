@@ -1,8 +1,10 @@
 package com.example
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -11,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -18,10 +21,15 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.speech.tts.TextToSpeech
+import android.webkit.JavascriptInterface
+import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -117,6 +125,9 @@ class MainActivity : ComponentActivity() {
         // 2. Initialize Network Monitor
         networkMonitor = NetworkMonitor(applicationContext)
 
+        // Request Microphone/Audio Permissions dynamically for Web Speech API and recording functions
+        requestMicrophonePermission()
+
         setContent {
             MyApplicationTheme {
                 var showSplash by remember { mutableStateOf(true) }
@@ -182,6 +193,20 @@ class MainActivity : ComponentActivity() {
             loadInterstitialAd() // Pre-load next
         } else {
             Log.d("MainActivity", "Interstitial ad not ready yet.")
+        }
+    }
+
+    private fun requestMicrophonePermission() {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                101
+            )
         }
     }
 
@@ -303,6 +328,119 @@ fun SplashScreenLayout() {
     }
 }
 
+// Native TextToSpeech bridge class to handle Web Speech speechSynthesis in Android OS
+class AndroidTTSBridge(context: Context) : TextToSpeech.OnInitListener {
+    private var tts: TextToSpeech? = null
+    private var isInitialized = false
+    var onSpeechStateChanged: ((id: String, state: String) -> Unit)? = null
+
+    init {
+        tts = TextToSpeech(context.applicationContext, this)
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            isInitialized = true
+            tts?.language = Locale.getDefault()
+            
+            // Register standard native Utterance Listener to track speaking progress and trigger callbacks for web synthesis icons
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    utteranceId?.let { id ->
+                        onSpeechStateChanged?.invoke(id, "start")
+                    }
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    utteranceId?.let { id ->
+                        onSpeechStateChanged?.invoke(id, "end")
+                    }
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    utteranceId?.let { id ->
+                        onSpeechStateChanged?.invoke(id, "error")
+                    }
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    utteranceId?.let { id ->
+                        onSpeechStateChanged?.invoke(id, "error")
+                    }
+                }
+            })
+            Log.d("AndroidTTSBridge", "TTS initialized successfully and UtteranceProgressListener registered with standard locale: ${Locale.getDefault()}")
+        } else {
+            Log.e("AndroidTTSBridge", "TTS initialization failed status: $status")
+        }
+    }
+
+    @JavascriptInterface
+    fun speak(text: String) {
+        speak(text, null, 1.0f, null)
+    }
+
+    @JavascriptInterface
+    fun speak(text: String, lang: String?) {
+        speak(text, lang, 1.0f, null)
+    }
+
+    @JavascriptInterface
+    fun speak(text: String, lang: String?, rate: Float) {
+        speak(text, lang, rate, null)
+    }
+
+    @JavascriptInterface
+    fun speak(text: String, lang: String?, rate: Float, utteranceId: String?) {
+        Log.d("AndroidTTSBridge", "Native speaking requested for: '$text' with lang tag: '$lang', rate: $rate, id: '$utteranceId'")
+        if (isInitialized && tts != null) {
+            val locale = if (!lang.isNullOrBlank()) {
+                try {
+                    Locale.forLanguageTag(lang)
+                } catch (e: Exception) {
+                    Locale.getDefault()
+                }
+            } else {
+                Locale.getDefault()
+            }
+            tts?.language = locale
+            
+            // Speed up or set speech rate according to web parameter
+            val finalRate = if (rate <= 0f) 1.0f else rate
+            tts?.setSpeechRate(finalRate)
+            
+            val finalId = utteranceId ?: ("UtteranceId_" + System.currentTimeMillis())
+            
+            // Use Bundle parameter key to ensure compatibility across Xiaomi, Samsung, and other device types
+            val params = Bundle().apply {
+                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, finalId)
+            }
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, finalId)
+        } else {
+            Log.e("AndroidTTSBridge", "TTS speak called but not fully initialized or tts is null. isInitialized=$isInitialized")
+        }
+    }
+
+    @JavascriptInterface
+    fun stop() {
+        Log.d("AndroidTTSBridge", "Native stopping speech output")
+        if (isInitialized && tts != null) {
+            tts?.stop()
+        }
+    }
+
+    fun shutdown() {
+        try {
+            tts?.stop()
+            tts?.shutdown()
+            Log.d("AndroidTTSBridge", "TTS clean shutdown done")
+        } catch (e: Exception) {
+            Log.e("AndroidTTSBridge", "Error in TTS shutdown", e)
+        }
+    }
+}
+
 // Core webview & interactive overlay wrapper
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -316,6 +454,195 @@ fun MainScreenContent(
     var hasConnectionError by remember { mutableStateOf(false) }
 
     val homeUrl = "https://translator-lovat-six.vercel.app/"
+    val context = LocalContext.current
+    
+    val ttsBridge = remember {
+        AndroidTTSBridge(context).apply {
+            onSpeechStateChanged = { id, state ->
+                // Ensure evaluating scripts runs safely on the UI Main Thread
+                webViewRef?.post {
+                    val script = when (state) {
+                        "start" -> "if (window.AndroidTTSCallbacks) window.AndroidTTSCallbacks.onStart('$id');"
+                        "end" -> "if (window.AndroidTTSCallbacks) window.AndroidTTSCallbacks.onEnd('$id');"
+                        else -> "if (window.AndroidTTSCallbacks) window.AndroidTTSCallbacks.onError('$id', '$state');"
+                    }
+                    webViewRef?.evaluateJavascript(script, null)
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            ttsBridge.shutdown()
+        }
+    }
+
+    // Polyfill script to inject native Android TextToSpeech in WebView seamlessly overriding window.speechSynthesis
+    val injectTtsScript = """
+        (function() {
+            if (!window.AndroidTTS) {
+                console.warn("AndroidTTS is not bound to window yet.");
+                return;
+            }
+
+            var activeUtterances = {};
+
+            var customSpeak = function(utterance) {
+                if (!utterance) return;
+                var text = utterance.text || "";
+                var lang = utterance.lang || "en-US";
+                var rate = utterance.rate || 1.0;
+                var id = utterance.id || "ut_" + Math.random().toString(36).substr(2, 9);
+                utterance.id = id;
+                activeUtterances[id] = utterance;
+                
+                // Call multi-arg native bridge safely with speaking rate support for speed configuration
+                if (typeof window.AndroidTTS.speak === "function") {
+                    try {
+                        window.AndroidTTS.speak(text, lang, rate, id);
+                    } catch (e) {
+                        try {
+                            window.AndroidTTS.speak(text, lang, id);
+                        } catch (err) {
+                            window.AndroidTTS.speak(text);
+                        }
+                    }
+                }
+            };
+
+            var customCancel = function() {
+                window.AndroidTTS.stop();
+            };
+
+            // Comprehensive Voice Database to pass web translation voice match filters
+            var voices = [
+                { name: "English (US)", lang: "en-US", default: true, localService: true, voiceURI: "en-US" },
+                { name: "English (UK)", lang: "en-GB", default: false, localService: true, voiceURI: "en-GB" },
+                { name: "Hindi (India)", lang: "hi-IN", default: false, localService: true, voiceURI: "hi-IN" },
+                { name: "Urdu (Pakistan)", lang: "ur-PK", default: false, localService: true, voiceURI: "ur-PK" },
+                { name: "Spanish (Spain)", lang: "es-ES", default: false, localService: true, voiceURI: "es-ES" },
+                { name: "French (France)", lang: "fr-FR", default: false, localService: true, voiceURI: "fr-FR" },
+                { name: "German (Germany)", lang: "de-DE", default: false, localService: true, voiceURI: "de-DE" },
+                { name: "Arabic (Saudi Arabia)", lang: "ar-SA", default: false, localService: true, voiceURI: "ar-SA" },
+                { name: "Bengali (India)", lang: "bn-IN", default: false, localService: true, voiceURI: "bn-IN" },
+                { name: "Bengali (Bangladesh)", lang: "bn-BD", default: false, localService: true, voiceURI: "bn-BD" },
+                { name: "Italian (Italy)", lang: "it-IT", default: false, localService: true, voiceURI: "it-IT" },
+                { name: "Portuguese (Brazil)", lang: "pt-BR", default: false, localService: true, voiceURI: "pt-BR" },
+                { name: "Russian (Russia)", lang: "ru-RU", default: false, localService: true, voiceURI: "ru-RU" },
+                { name: "Japanese (Japan)", lang: "ja-JP", default: false, localService: true, voiceURI: "ja-JP" },
+                { name: "Korean (South Korea)", lang: "ko-KR", default: false, localService: true, voiceURI: "ko-KR" },
+                { name: "Chinese (China)", lang: "zh-CN", default: false, localService: true, voiceURI: "zh-CN" },
+                { name: "Turkish (Turkey)", lang: "tr-TR", default: false, localService: true, voiceURI: "tr-TR" }
+            ];
+
+            var customSpeechSynthesis = {
+                speak: customSpeak,
+                cancel: customCancel,
+                getVoices: function() { return voices; },
+                paused: false,
+                pending: false,
+                speaking: false,
+                onvoiceschanged: null
+            };
+
+            // Override Pattern 1: Override standard SpeechSynthesis prototype methods
+            if (window.SpeechSynthesis) {
+                try {
+                    Object.defineProperty(SpeechSynthesis.prototype, 'speak', {
+                        value: customSpeak,
+                        writable: true,
+                        configurable: true
+                    });
+                    Object.defineProperty(SpeechSynthesis.prototype, 'cancel', {
+                        value: customCancel,
+                        writable: true,
+                        configurable: true
+                    });
+                    Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', {
+                        value: function() { return voices; },
+                        writable: true,
+                        configurable: true
+                    });
+                } catch(e) {
+                    console.error("AndroidTTS: Failed to patch SpeechSynthesis prototype", e);
+                }
+            }
+
+            // Override Pattern 2: Override window.speechSynthesis object property directly
+            try {
+                delete window.speechSynthesis;
+                Object.defineProperty(window, 'speechSynthesis', {
+                    get: function() { return customSpeechSynthesis; },
+                    configurable: true,
+                    enumerable: true
+                });
+            } catch (e) {
+                try {
+                    window.speechSynthesis = customSpeechSynthesis;
+                } catch (err) {
+                    console.error("AndroidTTS: Hard assignment fail for window.speechSynthesis", err);
+                }
+            }
+
+            // Ensure window.SpeechSynthesisUtterance exists
+            if (!window.SpeechSynthesisUtterance) {
+                window.SpeechSynthesisUtterance = function(text) {
+                    this.text = text || "";
+                    this.lang = "en-US";
+                    this.volume = 1.0;
+                    this.rate = 1.0;
+                    this.pitch = 1.0;
+                    this.onstart = null;
+                    this.onend = null;
+                    this.onerror = null;
+                    this.id = "ut_" + Math.random().toString(36).substr(2, 9);
+                };
+            }
+
+            // Global callback receiver from Android Native TextToSpeech
+            window.AndroidTTSCallbacks = {
+                onStart: function(id) {
+                    var utt = activeUtterances[id];
+                    if (utt && typeof utt.onstart === 'function') {
+                        try { utt.onstart({ target: utt }); } catch(err) { console.error(err); }
+                    }
+                },
+                onEnd: function(id) {
+                    var utt = activeUtterances[id];
+                    if (utt) {
+                        if (typeof utt.onend === 'function') {
+                            try { utt.onend({ target: utt }); } catch(err) { console.error(err); }
+                        }
+                        delete activeUtterances[id];
+                    }
+                },
+                onError: function(id, msg) {
+                    var utt = activeUtterances[id];
+                    if (utt) {
+                        if (typeof utt.onerror === 'function') {
+                            try { utt.onerror({ target: utt, error: msg }); } catch(err) { console.error(err); }
+                        }
+                        delete activeUtterances[id];
+                    }
+                }
+            };
+
+            // Periodically fire 'voiceschanged' to notify translator pages of loaded voices
+            var triggerVoicesChanged = function() {
+                if (typeof customSpeechSynthesis.onvoiceschanged === 'function') {
+                    try { customSpeechSynthesis.onvoiceschanged(); } catch(e) {}
+                }
+                window.dispatchEvent(new Event('voiceschanged'));
+            };
+            triggerVoicesChanged();
+            setTimeout(triggerVoicesChanged, 100);
+            setTimeout(triggerVoicesChanged, 500);
+            setTimeout(triggerVoicesChanged, 1500);
+
+            console.log("AndroidTTS: Enhanced Web SpeechSynthesis polyfilled/overridden successfully!");
+        })();
+    """.trimIndent()
 
     // Back navigation management inside Compose
     BackHandler(enabled = webViewRef?.canGoBack() == true) {
@@ -350,14 +677,14 @@ fun MainScreenContent(
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("main_webview"),
-                    factory = { context ->
-                        WebView(context).apply {
+                    factory = { ctx ->
+                        WebView(ctx).apply {
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
 
-                            // Setup web settings optimized for performance and DOM storage features
+                            // Setup web settings optimized for extreme performance and DOM storage features
                             settings.apply {
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
@@ -367,19 +694,42 @@ fun MainScreenContent(
                                 cacheMode = WebSettings.LOAD_DEFAULT
                                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                 textZoom = 100
+                                mediaPlaybackRequiresUserGesture = false
+                                allowFileAccess = true
+                                allowContentAccess = true
+                                setSupportMultipleWindows(false)
+                            }
+
+                            // Force active GPU hardware rendering layers for high performance rendering
+                            setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+
+                            // Enable cookie synchronization to speed up network header calculations and API handshakes
+                            try {
+                                val cookieManager = android.webkit.CookieManager.getInstance()
+                                cookieManager.setAcceptCookie(true)
+                                cookieManager.setAcceptThirdPartyCookies(this, true)
+                            } catch (e: Exception) {
+                                Log.e("WebView", "Error setting active CookieManager parameters", e)
                             }
 
                             // Inject custom agent to let the web platform identify wrapper native integrations
                             settings.userAgentString = settings.userAgentString + " AI-Translator-Native-Android"
 
+                            // Register native speech synthesis proxy bridge
+                            addJavascriptInterface(ttsBridge, "AndroidTTS")
+
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                     isCurrentlyLoading = true
                                     hasConnectionError = false
+                                    // Inject script early to intercept before page starts fully consuming speech API
+                                    view?.evaluateJavascript(injectTtsScript, null)
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     isCurrentlyLoading = false
+                                    // Ensure fallback is injected even when DOM is fully settled
+                                    view?.evaluateJavascript(injectTtsScript, null)
                                 }
 
                                 override fun onReceivedError(
@@ -406,7 +756,7 @@ fun MainScreenContent(
                                     } else {
                                         try {
                                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                            context.startActivity(intent)
+                                            ctx.startActivity(intent)
                                         } catch (e: Exception) {
                                             Log.e("WebViewClient", "Error launching external URL intent", e)
                                         }
@@ -420,6 +770,15 @@ fun MainScreenContent(
                                     pageLoadingProgress = newProgress / 100f
                                     if (newProgress == 100) {
                                         isCurrentlyLoading = false
+                                    }
+                                }
+
+                                override fun onPermissionRequest(request: PermissionRequest?) {
+                                    Log.d("MainActivity", "onPermissionRequest requested for: ${request?.resources?.joinToString()}")
+                                    try {
+                                        request?.grant(request.resources)
+                                    } catch (e: Exception) {
+                                        Log.e("MainActivity", "Error granting WebView permission request", e)
                                     }
                                 }
                             }
